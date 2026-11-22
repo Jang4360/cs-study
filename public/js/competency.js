@@ -1,6 +1,6 @@
 /**
  * Pure competency computation (no DOM dependencies).
- * Contract defined in docs/SPEC.md section 5.
+ * Contract defined in docs/spec/SPEC.md section 5.
  */
 
 const DOMAINS = ['os', 'network', 'infra', 'db', 'ai'];

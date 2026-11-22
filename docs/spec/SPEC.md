@@ -1,6 +1,7 @@
 # 인시던트 랩 (가칭) — v0.2 구현 명세
 
-> 작성: Claude (기획·콘텐츠·검증). 구현: GEMINI-4-NEON. 이 문서, `content/**`, `tests/acceptance/**`, `docs/design-skills/**`는 Claude 소유다.
+> 작성·구현·테스트: Claude. 검수: Gemini 4 Neon(읽기 전용). v0.1~v0.3(2026-11-20~21)은 NEON이 구현했고, 2026-11-22부터 분담이 바뀌었다(전역 CLAUDE.md 참고).
+> 아래 '절대 제약'의 수정 금지 규칙은 당시 NEON 구현자에게 준 것이다. 지금은 이 문서·`content/`·`tests/acceptance/`를 바꿀 때 docs/decisions.md 와 맞는지 확인하는 기준으로 쓴다.
 > v0.1에서 바뀐 것: 애플 스타일 폐기, 두 모드 분리(퀘스트=동적, 학습=정돈), 보조 학습(S1/S2) 삭제, 퀘스트 화면은 사건별 "보드" 중심, 증거 카드 목록 제거, 일반 학습(카테고리 → 주제 → 완료) 신설, 역량 점수 도입.
 
 ## 0. 제품 개요
@@ -11,7 +12,7 @@
 
 ## 1. 절대 제약 (위반 시 실패)
 
-1. 수정 금지: `content/**`, `tests/acceptance/**`, `docs/SPEC.md`, `docs/design-skills/**`. 틀렸다고 판단되면 고치지 말고 보고한다.
+1. 수정 금지: `content/**`, `tests/acceptance/**`, `docs/spec/SPEC.md`, `docs/research/design/**`. 틀렸다고 판단되면 고치지 말고 보고한다.
 2. 실행 금지: `sudo`, `systemctl`, `git commit`, `git push`, `/srv/orca/cs-study` 밖 수정.
 3. 서버는 `HOST`(기본 127.0.0.1)·`PORT`(기본 8790)로만 바인딩. `0.0.0.0` 금지. 현재 `server/server.mjs`는 유지(필요하면 MIME만 추가).
 4. 런타임 외부 요청 금지(CDN, 웹폰트, 분석). 런타임 의존성 0, 빌드 단계 없음. devDependency는 `@playwright/test@1.49.1`만.

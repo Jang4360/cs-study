@@ -1,6 +1,6 @@
 /**
  * Pure virtual terminal command engine (no DOM dependencies).
- * Contract defined in docs/SPEC.md section 12.2:
+ * Contract defined in docs/spec/SPEC.md section 12.2:
  *   runCommand(spec, input) -> { kind: 'ok' | 'error' | 'clear', lines: [{ id?, text }] }
  */
 

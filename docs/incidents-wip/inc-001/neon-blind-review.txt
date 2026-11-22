@@ -1,0 +1,84 @@
+ANSWERS TO Q1-Q4
+
+Q1. E2-L1, E3-L1 (matched against ticket lines E1-L1, E1-L2, E1-L3; with E3-L2, E3-L3, E3-L5, E3-L6 continuing the same req=gw-7f3a91 trace).
+Justification: E3-L1 directly binds ticket transaction ID PTX-20261118-0421 (from E1-L2) to internal request ID req=gw-7f3a91 inside point-server. E2-L1 links req=gw-7f3a91 to partner-A's POST /v1/points/grant request that ended with status=499 and request_time=3.000, matching the ticket's 3000ms read timeout around 14:02:14 (E1-L1, E1-L3).
+
+Q2. H3 (처리는 끝났지만 응답이 전달되지 않았다) — Line IDs: E3-L2, E4-L1, E3-L5, E2-L1, E3-L6.
+Justification: The point grant transaction was committed and persisted in the database with status GRANTED and grant_id G-88120 (E3-L2, E4-L1), and the synchronous notify-service call finished after 4485ms (E3-L5). However, partner-A timed out and closed the connection after 3000ms (E1-L3, E2-L1), so the point server's response write failed with Broken pipe (E3-L6).
+
+Q3. E4-L1, E3-L6.
+Justification: E4-L1 is the authoritative database record proving PTX-20261118-0421 was committed as GRANTED (G-88120). E3-L6 proves the point server failed to send the response back over the closed connection (Broken pipe).
+
+Q4. R2 (재전송하지 말라. 이미 처리됐다고 거래번호와 지급 ID(G-88120)로 회신한다) — Line IDs: E4-L1, E3-L2.
+Justification: Because PTX-20261118-0421 is already persisted in the database as GRANTED with grant_id G-88120 (E4-L1, E3-L2), resending risks duplicate point issuance given no evidence of idempotency protection. The partner should be instructed not to resend and given confirmation with PTX-20261118-0421 and G-88120.
+
+
+STRICT TECHNICAL REVIEW
+
+PART 1: TECHNICAL INCONSISTENCIES AND IMPLAUSIBILITIES
+
+1. Nginx access.log timestamps use request start time instead of completion time (E2-L1, E2-L2 vs E3-L1, E3-L4, E1-L1)
+- In nginx, access log entries are written in the log phase at request completion, and standard timestamp variables ($time_local, $time_iso8601, $msec) reflect the completion time, not the start time.
+- In E2-L1, the timestamp is 14:02:11.120 with request_time=3.000, yet E3-L1 shows point-server receiving req=gw-7f3a91 25ms later at 14:02:11.145, and E1-L1 reports the timeout at 14:02:14 (matching 14:02:11.120 + 3.000s = 14:02:14.120). Similarly, E2-L2 logs 14:02:12.300 with request_time=0.041, while E3-L4 logs point-server rejecting req=gw-7f3a9c 18ms later at 14:02:12.318.
+- If E2 used real nginx completion timestamps, E2-L1 would be timestamped ~14:02:14.120 (not 14:02:11.120) and E2-L2 ~14:02:12.341. Conversely, if 14:02:11.120 were a real nginx completion timestamp, the request would have started at 14:02:08.120, contradicting E3-L1 and E1-L1.
+
+2. Impossible log ordering in api-gateway access.log (E2-L1, E2-L2, E2-L3)
+- E2-L1 (req=gw-7f3a91) ran from ~14:02:11.120 to ~14:02:14.120 (3.000s).
+- E2-L2 (req=gw-7f3a9c) finished around 14:02:12.341 (0.041s), and E2-L3 (req=gw-7f3aa2) finished around 14:02:13.892 (0.022s).
+- Even if a custom nginx log format explicitly printed a request-start timestamp, the gateway cannot know status=499 or request_time=3.000 until 14:02:14.120. Therefore, in an append-only access.log, E2-L1 MUST appear AFTER E2-L2 and E2-L3, not before them. The shown order is only possible if the log was post-processed and re-sorted by request start time without disclosing that fact.
+
+3. Exact request_time=3.000 at nginx is implausible for a client-side 3000ms read timeout (E1-L3, E2-L1, E5-L1)
+- In nginx, $request_time starts when nginx reads the first byte of the request from the client and stops when nginx finishes sending the response or detects the client aborted the connection (logging 499).
+- In Java HTTP clients, SocketTimeoutException: Read timed out (3000ms) starts counting after the client finishes sending the request and waits to read response bytes.
+- Because of request body transmission/reading time plus network latency for the client's TLS close_notify / TCP FIN or RST to travel across the external HTTPS link to the gateway, nginx's observed request_time for a 3000ms client read timeout would almost always exceed 3.000s (e.g., 3.015s to 3.080s), not equal 3.000 to the exact millisecond. An exact 3.000 looks like a server-side 3s timeout, which in nginx would yield 504 Gateway Timeout rather than 499.
+
+4. Broken pipe (EPIPE) semantics on a peer-closed TCP socket and nginx abort configuration (E2-L1, E3-L5, E3-L6)
+- Under default nginx settings (proxy_ignore_client_abort off), when partner-A closes the connection at ~14:02:14.120, nginx logs 499 and immediately closes the upstream TCP connection to point-server by sending TCP FIN. Because point-server's worker thread is blocked synchronously in notify-service until 14:02:15.890, point-server's socket sits in CLOSE_WAIT.
+- Under POSIX/Linux TCP semantics, the FIRST write() to a CLOSE_WAIT socket whose peer sent FIN normally succeeds at the syscall level (buffering and transmitting the bytes); the peer kernel then replies with TCP RST, and only a SECOND write() after the RST arrives fails with EPIPE (Broken pipe).
+- For a small JSON response (such as a grant confirmation containing G-88120) written in a single buffered syscall, the server often receives no Broken pipe error at all. Observing Broken pipe at E3-L6 requires either multiple separate write() calls (e.g., headers flushed separately from body, or chunked encoding) with enough time between writes for nginx's RST to arrive, or nginx closing the upstream socket with an active RST (e.g., SO_LINGER=0).
+- Conversely, if proxy_ignore_client_abort were set to on, nginx would keep the upstream connection open and point-server would not get Broken pipe at all.
+- Additionally, the 13ms gap between E3-L5 (14:02:15.890) and E3-L6 (14:02:15.903) is somewhat long for serializing a tiny response and hitting a local-network EPIPE, though not impossible under framework or GC overhead.
+
+5. DB timestamp vs application log timestamp, cross-host clock assumptions, and pre-insert delay (E3-L1, E3-L2, E4-L1)
+- E4-L1 has created_at = 14:02:11.398, which is 4ms before E3-L2 (14:02:11.402, tx committed). While an INSERT timestamp preceding a commit-log timestamp by 4ms is plausible on tightly synced clocks (e.g., MySQL NOW() or app-assigned timestamp), comparing a 4ms delta across separate hosts (point-server vs DB) without clock-skew information is fragile because ordinary NTP drift between hosts is commonly several milliseconds.
+- All timestamps across E1, E2, E3, and E4 omit timezone offsets.
+- If the database is PostgreSQL and created_at uses DEFAULT NOW()/CURRENT_TIMESTAMP, PostgreSQL sets NOW() at transaction BEGIN rather than INSERT, meaning the entire DB transaction took only 4ms (11.398 to 11.402) while 253ms elapsed between receiving the request (14:02:11.145) and starting the transaction (14:02:11.398) on a lightly loaded server (CPU 22%, DB pool 6/20). Even under MySQL, spending 253ms before inserting the grant row is unexplained given E6-L1 and E6-L2.
+
+6. Monitoring metrics inconsistencies (E6-L2, E6-L3, E6-L4 vs E2, E5-L1)
+- E6-L4 reports point grant API p95 response time of 4.7-5.0s during 14:01-14:09. If this metric is measured at the API gateway and partner-A aborts at 3.0s (status=499), gateway-side request_time for partner-A is capped at ~3.0s and cannot reach 4.7-5.0s unless enough other clients have timeouts >= 5s to push p95 up, or E6-L4 is measured on point-server rather than the gateway (unstated).
+- Arithmetic discrepancy between E6-L3 and E6-L4: Normally, grant API p95 is 350ms and notify-service p95 is 120ms (non-notify overhead ~230ms, consistent with the observed 260ms from 14:02:11.145 to 14:02:11.405). During 14:01-14:09, notify-service p95 is 4.1-4.6s; adding ~250ms yields ~4.35-4.85s, yet E6-L4 reports a noticeably higher floor of 4.7-5.0s despite healthy CPU (22%) and DB pool usage (6/20).
+- E6-L2 reports up to 6/20 concurrent DB connections, whereas E2 shows only 3 total requests over 2.75s (~1 RPS) with ~0.25s DB work (which would use ~1 connection). This is only consistent if E2 is a filtered excerpt or a single gateway node among many, which is not noted.
+
+7. Timeout values and minor synthetic-evidence details (E1-L3, E5)
+- Timeout hierarchy (E5): Client read timeout (3s) is shorter than DB timeout (5s), notify-service timeout (10s), and gateway upstream timeout (30s). While this is a plausible real-world misconfiguration (and the mechanism behind the incident), having a 30s gateway upstream timeout and 10s synchronous notification timeout on a payment/points grant API without documented idempotency or async notification is a notable architectural flaw.
+- Minor Java realism detail: E1-L3 shows "java.net.SocketTimeoutException: Read timed out (3000ms)". Standard JDK SocketTimeoutException messages are simply "Read timed out" without "(3000ms)" appended unless wrapped by custom partner code.
+
+8. Omissions and logging inconsistencies in E3 and E4
+- Missing entry log in E3: req=gw-7f3a91 logs "grant request received" (E3-L1), but req=gw-7f3a9c (also POST /v1/points/grant in E2-L2) jumps straight to "grant rejected: INVALID_MEMBER" (E3-L4) with no "grant request received" line, indicating either pre-controller validation or silently omitted log lines.
+- Missing outcome statuses in E3-L5 and E3-L6: E3-L5 logs only "notify-service slow response 4485ms" without stating whether notify-service returned 2xx or 5xx, and E3-L6 logs "response write failed: Broken pipe" without stating whether point-server was attempting to write HTTP 200 or 500.
+- Incomplete DB verification in E4: E4-L1 does not select amount (5000) or member_id, does not check any user balance/ledger table if separate from point_grant, and does not show whether partner_tx_id has a unique constraint enforcing idempotency.
+
+
+PART 2: PLACES WHERE THE EVIDENCE SUPPORTS MORE THAN ONE REASONABLE ANSWER
+
+1. Q1 (Log lines proving PTX-20261118-0421 is the same request inside our system)
+- Minimal internal-log answer: E3-L1 alone already proves PTX-20261118-0421 reached our system as req=gw-7f3a91.
+- Gateway-to-app correlation answer: E2-L1 and E3-L1 (linking partner-A's 3.000s 499 request at the gateway to PTX-20261118-0421 via req=gw-7f3a91).
+- Full-correlation answer: Including E1-L1, E1-L2, E1-L3 (the ticket fields being matched), E3-L2/E3-L3/E3-L5/E3-L6 (the rest of the req=gw-7f3a91 trace, especially E3-L6 matching the client disconnect), and/or E4-L1 (linking PTX-20261118-0421 to G-88120 from E3-L2, though E4-L1 is a DB query result rather than a log line).
+- Because Q1 does not specify whether "log lines" excludes E1/E4 or whether only the bridging lines vs the entire trace should be listed, multiple subsets are defensible.
+
+2. Q3 (Decisive evidence line ids, 1-2 lines)
+- Proving H3 ("processing finished, response not delivered") requires one line for commit/completion and one line for failed response delivery, creating four reasonable 2-line pairs:
+  a) E4-L1 + E3-L6: authoritative DB GRANTED state + server-side Broken pipe.
+  b) E4-L1 + E2-L1: authoritative DB GRANTED state + gateway 499 client abort.
+  c) E3-L2 + E3-L6: same req=gw-7f3a91 showing tx committed + Broken pipe (self-contained correlation within E3, without needing E3-L1 to bridge E4-L1).
+  d) E3-L2 + E2-L1: same req=gw-7f3a91 showing tx committed + gateway 499.
+- Notably, any 2-line answer using E4-L1 paired with E2-L1 or E3-L6 strictly depends on a third linking line (E3-L1 or E3-L2) to connect PTX-20261118-0421 / G-88120 to req=gw-7f3a91, which creates tension with the 1-2 line constraint.
+
+3. Q2 (Actual state of the request: H3 vs H4)
+- H3 is clearly the primary intended answer for the point grant itself.
+- However, because E3-L5 does not confirm that notify-service succeeded (only that it responded in 4485ms), E3-L6 does not show whether point-server tried to write HTTP 200 or 500, and E4-L1 does not verify the granted amount (5000) or final member balance, a very strict reader who defines "처리" (processing) to include successful synchronous notification and verified credit amount could argue H4 (아직 판단할 수 없다) until those fields are checked.
+
+4. Q4 (Reply to partner: R2 vs R3, and caveat regarding R1)
+- R2 is the clear operational answer because point_grant already holds GRANTED for PTX-20261118-0421 (G-88120) and resending without confirmed idempotency risks double-granting.
+- Still, two minor ambiguities exist: (a) if the reviewer is unwilling to confirm completion before verifying amount=5000, member_id, and notify-service success status, they could briefly favor holding confirmation internally (partially overlapping with R3, though asking the partner for additional verification rather than checking internally makes R3 weak); and (b) the evidence does not state whether POST /v1/points/grant is idempotent on partner_tx_id—if it were idempotent, R1 would not actually cause duplicate grants (though R2 would still be preferable since we already have G-88120).

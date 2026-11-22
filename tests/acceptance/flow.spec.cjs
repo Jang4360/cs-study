@@ -1,5 +1,5 @@
 // Acceptance tests owned by Claude. NEON must not edit this file.
-// v0.2 contract — see docs/SPEC.md
+// v0.2 contract — see docs/spec/SPEC.md
 // Run: timeout 600 npx playwright test -c tests/acceptance/playwright.config.cjs --reporter=line
 const { test, expect } = require('@playwright/test');
 const http = require('node:http');

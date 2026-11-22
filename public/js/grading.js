@@ -1,6 +1,6 @@
 /**
  * Pure grading functions (no DOM dependencies).
- * Contract defined in docs/SPEC.md section 4.
+ * Contract defined in docs/spec/SPEC.md section 4.
  */
 
 const RATIONALE_LENGTH_ERROR = '판단 근거를 10자 이상 200자 이하로 적어 주세요.';

@@ -1,0 +1,3 @@
+Read problem.md in this directory. It is a fictional Linux/JVM troubleshooting exercise. Work independently from first principles.
+Answer Q1-Q4 with line ids and a 1-2 sentence justification each.
+Then act as a strict technical reviewer (Linux kernel OOM, systemd, JVM memory/NMT, Netty direct buffers, Spring Boot actuator): list every technical inconsistency or implausibility in the transcript — numbers that do not add up (RSS vs heap vs direct vs NMT vs free/top/ps), timestamps, PIDs, systemd/journal message formats, dmesg formats, JVM flag semantics (e.g. MaxDirectMemorySize behaviour), and any place where the evidence supports more than one reasonable answer. Be concrete with line ids. Do not create or modify files. Output plain text only.

@@ -1,0 +1,155 @@
+PART 1: ANSWERS TO Q1-Q4
+
+Q1. Line IDs: [K-L1], [K-L2], [K-L4], [K-L5], [J-L1], [J-L2], [J-L3], [J-L6], [J-L7], [J-L8], [SYS-L4].
+Justification: [K-L1]/[K-L2] (03:12:40, PID 11820) and [K-L4]/[K-L5] (05:47:09, PID 19044) directly show the Linux kernel OOM killer terminating the java process via Out of memory: Killed process. [J-L1]-[J-L3], [J-L6]-[J-L8], and [SYS-L4] corroborate from systemd that the unit's main process received status=9/KILL and failed with result 'oom-kill'.
+
+Q2. Answer: H3 (off-heap direct buffer memory kept growing until the kernel OOM killer terminated the process).
+Justification: Across v2.3.1 runs ([M-L5]-[M-L18]), heap usage stayed stable at 480-600 MB out of 1024 MB while direct buffer memory grew monotonically from ~60 MB (under v2.3.0) to over 2.3 GB, driving anonymous RSS to ~3.5-3.6 GB on a 4 GB swapless host until the kernel OOM killer killed the JVM ([K-L2], [K-L5]). App logs show no errors ([A-L1]-[A-L8]), disk usage is 32-41% ([DF-L1], [DF-L2]), and live NMT/Actuator confirm ~905 MiB already in direct buffers ([N-L8], [C-L1]).
+
+Q3. Decisive evidence line IDs: [M-L11], [K-L2].
+Justification: [M-L11] shows that 12 minutes before the first crash, PID 11820 had healthy heap usage (570 MB) but 2320 MB of direct buffer memory pushing RSS to 3260 MB; [K-L2] proves the kernel OOM killer terminated that exact PID 11820 at anon-rss 3561208 kB.
+
+Q4. Answer: R2 (roll back the v2.3.1 canary on point-api-02 to v2.3.0, fix the buffer leak in the filter, then redeploy).
+Justification: [D-L3]/[D-L4] show v2.3.1 was canary-deployed only to point-api-02 at 23:40:03, and [M-L1]-[M-L5] show direct memory was flat at ~60 MB on v2.3.0 and began leaking immediately upon switching to v2.3.1 (while point-api-01 remains healthy on v2.3.0). Rolling back immediately prevents the next OOM kill already building on PID 24817 ([M-L17], [M-L18], [C-L1]) without masking the leak via restarts or larger RAM.
+
+
+PART 2: STRICT TECHNICAL REVIEW
+
+1. Memory Accounting and Math Inconsistencies
+
+- ps/top %MEM calculation error ([P-L2], [P-L3], [FR-L1]):
+  Total RAM is 3933 MiB = 4,027,392 KiB ([FR-L1]). Java RSS is 1,884,312 KiB = 1,840.15 MiB ([P-L3], [P-L1]).
+  1,884,312 / 4,027,392 = 46.79% (46.8% in top, 46.7% in procps ps), NOT 47.9%. The transcript mistakenly divided decimal MB (1884.312) by MiB (3933) to get 47.9%.
+
+- NMT Total does not equal the sum of listed categories ([N-L1]-[N-L9]):
+  Summing [N-L2] through [N-L9] gives reserved = 3,437,993 KB and committed = 2,261,341 KB, leaving 1,234,127 KB (~1.18 GiB) of reserved memory and 100,503 KB (~98 MiB) of committed memory unaccounted for relative to [N-L1] (reserved=4,672,120 KB, committed=2,361,844 KB). While NMT summary has other categories (Compiler, Arena Chunk, NMT, Module, etc.) that appear omitted, they do not account for 1.18 GiB of reserved space or ~98 MiB of committed space.
+
+- NMT Class reserved is smaller than GC.heap_info Metaspace reserved ([N-L3] vs [H-L2]):
+  [H-L2] reports Metaspace reserved = 1,114,112 KB, whereas [N-L3] reports Class reserved = 1,067,301 KB (46,811 KB less). In HotSpot NMT where Class encompasses Metaspace (non-class + compressed class space), Class reserved must be >= Metaspace reserved. (Also, if Metaspace were tracked separately from Class, the ~1.11 GB Metaspace reserved and ~93 MB committed almost match the exact missing gap in [N-L1], implying Metaspace was double-counted in Total while still appearing under Class.)
+
+- NMT committed (2,361,844 KB) impossibly exceeds OS RSS (1,884,312 KB) with 0 swap ([N-L1], [P-L1], [FR-L2]):
+  The gap is 477,532 KB (~466 MiB) with zero swap. While untouched committed mmap pages do not count toward RSS, here:
+  (a) Direct buffers in Other ([N-L8], 926,981 KB) are zero-initialized on allocation by ByteBuffer.allocateDirect / Unsafe.setMemory, so 100% are resident.
+  (b) Java Heap ([N-L2], 1,048,576 KB) has -Xms1g -Xmx1g ([P-L3], [P-L4]) and has survived 211 Young GCs and 8 Concurrent Cycles ([H-L3]) with peak usage >= 702 MiB ([G-L3]). G1GC cycles through free regions and does not uncommit when Xms == Xmx, so nearly the entire 1024 MiB heap has been dirtied and is resident. Even using the unrealistically low floor of 702 MiB (718,848 KB) touched heap, plus 926,981 KB direct, 92,011 KB used Metaspace ([H-L2]), 44,120 KB Code, 60,932 KB GC, 28,917 KB Symbol, 1,204 KB Internal, and 28,774 KB SHR ([P-L2]) already sums to 1,901,787 KB > 1,884,312 KB RSS before counting Thread stacks, glibc malloc overhead, or the remaining ~322 MiB of touched heap. Realistically RSS would be ~2.2-2.3 GiB.
+
+- Synthetic constant-offset formula in memstat.log and impossible RSS shrinking under -Xms1g ([M-L1]-[M-L18]):
+  Every single one of the 18 rows in memstat.log satisfies the exact equation:
+  rss_mb = heap_used_mb + direct_mb + 370.
+  This is physically impossible on a JVM with -Xms1g -Xmx1g:
+  (a) In [M-L1]-[M-L4] (v2.3.0 running for 6 days), rss_mb drops from 971 to 945 and from 1022 to 991 in lockstep with heap_used_mb (540->515, 590->560). G1GC with Xms == Xmx never returns freed heap pages to the OS between young GCs, so RSS does not fall 1-to-1 when heap_used drops.
+  (b) A 6-day-old JVM with -Xms1g (1024 MiB) + ~92 MiB Metaspace + ~44 MiB Code + ~61 MiB GC + ~61 MiB direct cannot have RSS = 945 MB ([M-L2]).
+  (c) Ten minutes after [M-L18] (at 06:40:12), the implied overhead suddenly drops from 370 MB to 322.9 MiB (1840.15 MiB RSS - 612 MiB heap_used - 905.25 MiB direct).
+
+- dmesg OOM total-vm vs anon-rss growth contradiction ([K-L2], [K-L5] vs [P-L3]):
+  Between 06:40:12 (PID 24817, [P-L3]) and OOM kill (PID 11820 [K-L2], PID 19044 [K-L5]), anon-rss grew by +1,676,896 KB (to 3,561,208 KB) and +1,728,032 KB (to 3,612,344 KB) due to ~1.6-1.7 GB of additional direct buffer allocations. However, total-vm only increased by +634,184 KB (7,078,300 -> 7,712,484 KB) and +719,820 KB (7,078,300 -> 7,798,120 KB). New malloc/mmap direct buffer allocations expand virtual address space at least 1-for-1 unless >1 GB of empty virtual arena space was already pre-mapped at 06:40.
+
+- dmesg file-rss:0kB twice on the executing process ([K-L1]/[K-L2], [K-L4]/[K-L5]):
+  Both OOM kills report file-rss:0kB on the java process that itself invoked the OOM killer. While extreme reclaim can drive file-rss very low, a process actively executing code in java/libjvm.so/libc.so having exactly 0 kB of file-backed pages on two separate occasions is highly implausible.
+
+- NMT Thread reserved == committed ([N-L4]):
+  Thread reports reserved=52398KB, committed=52398KB identically. On Linux with Java 17 (JDK-8191369), NMT tracks actual committed thread stack pages separately from reserved 1 MB stack mappings, so committed is normally a small fraction of reserved.
+
+- Leak rate in memstat.log does not correlate with receipts_upload traffic in access-hourly.log ([M-L5]-[M-L18] vs [X-L5]-[X-L8]):
+  Hour 00 ([X-L5]): 411 uploads, direct grew +735 MB (95->830) = 1.79 MB/upload.
+  Hour 02 ([X-L6]): 228 uploads, direct grew +760 MB (1560->2320) = 3.33 MB/upload.
+  Hour 04 ([X-L7]): 244 uploads, direct grew +990 MB (650->1640) = 4.06 MB/upload.
+  Hour 06 06:00-06:40 ([X-L8]): 402 uploads, direct grew +675 MiB (230->905) = 1.68 MiB/upload.
+  When receipt upload volume dropped nearly in half overnight (411 -> 228 -> 244), the hourly direct-memory leak rate actually increased (+735 -> +760 -> +990 MB/hr), and when uploads surged back to a ~603/hr pace at 06:00, leak-per-upload dropped 2.4x.
+
+- systemd Memory: 1.8G ([SYS-L3]) vs process RSS 1.80 GiB ([P-L1]):
+  Cgroup memory.current reported by systemctl status includes process anon RSS plus cgroup-charged page cache (jar, shared libs, log writes) and kernel slab memory, so it would typically exceed raw process RSS (1.80 GiB) rather than matching it identically.
+
+
+2. GC and Heap State Contradictions
+
+- gc.log exists despite NO GC logging flag on the JVM command line ([G-L1]-[G-L3] vs [F-L1], [P-L3], [P-L4]):
+  ExecStart ([F-L1]) and ps ([P-L3]) pass only -Xms1g -Xmx1g -XX:MaxDirectMemorySize=3g -XX:NativeMemoryTracking=summary -jar .... There is no -Xlog:gc*:file=/var/log/point-api/gc.log flag, yet /var/log/point-api/gc.log contains Java 17 unified GC logs from the current PID.
+
+- Mathematical impossibility between jstat -gcutil ([H-L3]) and jcmd GC.heap_info ([H-L1]):
+  [H-L1] reports total heap = 1024 regions (1,048,576 KB), used = 612 regions (626,688 KB), young = 212 regions (217,088 KB), survivors = 9 regions (9,216 KB), meaning Eden used = 203 regions (207,872 KB) and Old used = 400 regions (409,600 KB).
+  [H-L3] reports S0=0.00%, S1=100.00%, E=27.51%, O=56.80%.
+  First, in G1GC, EC + S1C + OC = 1024 regions, so EC + OC = 1015 regions. With E=27.51% and O=56.80%, the maximum possible EU + OU is strictly less than 56.80% * 1015 = 576.5 regions; adding 9 survivor regions gives at most 585.5 regions (599,572 KB), making 612 regions (626,688 KB) in [H-L1] and [C-L2] mathematically impossible.
+  Second, dividing [H-L1]'s Eden used (203) by 0.2751 gives EC = 738 regions and Old used (400) by 0.5680 gives OC = 704 regions, totaling 1,442 regions (> 1,024 total heap regions).
+
+- Contradiction between gc.log ([G-L1]-[G-L3]) and GC.heap_info ([H-L1]) / jstat ([H-L3]):
+  (a) At 06:39:41 ([G-L3]), GC(211) finished with 588M used (Old + Survivor, Eden = 0M). At 06:40:12 (31s later, with YGC still at 211 in [H-L3], meaning no GC occurred in between), [H-L1] shows Old + Survivor = 409M (400M Old + 9M Survivor) and Eden = 203M. Old Gen cannot drop by 179M without a GC, nor can Eden reach 203M when [G-L1]-[G-L3] show Young GCs consistently firing when Eden fills by only ~114-119M (579M->701M, 583M->702M).
+  (b) GC numbering mismatch: HotSpot unified logging is 0-indexed (GC(0) is the first GC) and assigns separate GC(N) IDs to G1 concurrent mark cycles (CGC=8 in [H-L3] corresponds to 4 concurrent cycles in Java 17 since jstat counts both Remark and Cleanup in CGC). Thus the 211th Young GC would not be GC(211) (it would be ~GC(214), or GC(210) even without CGC IDs).
+  (c) GC cadence mismatch: [G-L1]-[G-L3] show ~49-50s between Young GCs during peak 06:38-06:39 traffic ([X-L8]), which implies ~64 Young GCs over 53 minutes—far below YGC=211 (which averages 1 YGC every 15 seconds).
+
+
+3. Timestamps, CPU%, and PIDs
+
+- Identical microsecond fractional timestamps across all dmesg lines (lines 87-91):
+  All five dmesg lines spanning 4 hours 47 minutes across three unrelated events end in the exact same fractional second .412000 ([3532909.412000], [3540868.412000], [3550137.412000]). Even the two lines of a single OOM event (invoked oom-killer and Out of memory: Killed process) never share an identical microsecond timestamp because the kernel dumps the stack trace, Mem-Info, and task list in between (taking milliseconds).
+
+- CPU% math errors in ps aux and top ([P-L2], [P-L3], lines 35, 41-42, 47-48, 60):
+  (a) ps aux reports lifetime average CPU% (TIME / ELAPSED). For PID 24817, 6m12.44s (372.44s) / 52m58s (3178s) = 11.72% (11.7%), not 11.3% ([P-L3]).
+  (b) filebeat (PID 603, started Oct11, uptime 3,553,320s, TIME 31:10 = 1870s) has lifetime CPU% = 0.05% (0.0% or 0.1%), NOT 0.7% (line 47).
+  (c) node_exporter (PID 588, started Oct11, TIME 12:41 = 761s) has lifetime CPU% = 0.02% (0.0%), NOT 0.3% (line 48).
+  (d) top -b -n 1 (line 35) reports 11.6% non-idle across 4 vCPUs (= 46.4% of one vCPU), yet the top three processes sum to only 12.3% (and all three are in state S with only 1 running task, top itself). Also, top's first iteration matches ps aux's buggy 11.3/0.7/0.3 values verbatim.
+
+- Implausible PID allocation rate swing:
+  From Nov 14 (PID 8812, [M-L1]) to Nov 20 23:40 (PID 11820, [M-L5]), PIDs advanced by only ~3,008 over 6.5 days (~19/hr). Then between 23:40 and 05:47, PIDs jumped 11820 -> 19044 -> 24817 (+12,997 in 6.1 hours, >2,100 forks/hr), before dropping back to +473 in 53 minutes (24817 -> 25290 at 06:40, line 132). Possible only if heavy short-lived batch jobs ran exclusively between midnight and 05:47.
+
+
+4. Systemd, Journalctl, and Dmesg Command and Format Errors
+
+- Nonsensical pipe command: $ journalctl -u point-api | journalctl -k (line 66):
+  journalctl -k ignores stdin completely and prints only kernel messages. Yet lines 67-77 display exclusively systemd[1] unit messages (output of journalctl -u point-api) with zero kernel messages, while running $ journalctl -k on line 93 produces completely different output.
+
+- Wrong output format for $ journalctl -k (lines 93-98):
+  Lines 94-98 are verbatim copies of dmesg -T bracketed timestamps ([Sat Nov 21 ...]), whereas real journalctl -k outputs syslog/journal format (Nov 21 03:12:40 point-api-02 kernel: ...).
+
+- Misplaced and malformed systemd-journald message in dmesg / journalctl -k (lines 80, 87, 94):
+  (a) systemd-journald rotation warnings are logged to the journal, not to the kernel ring buffer (dmesg / journalctl -k).
+  (b) Persistent journal paths always include the 32-char machine-id directory (/var/log/journal/<machine-id>/system.journal), never /var/log/journal/system.journal.
+  (c) The actual systemd-journald format includes a percent sign: fill level at 75.0% (missing % after 75.0).
+
+- Missing mandatory systemd and kernel OOM lines:
+  (a) In journalctl -u point-api (lines 71-72, 76-77) and systemctl status (lines 63-64), systemd always logs Stopped Point API (Spring Boot). between Scheduled restart job and Started Point API (Spring Boot).
+  (b) systemctl status (lines 54-64) omits Tasks: and the CGroup: process tree, and skips [J-L6] and [J-L7] from its recent log tail even though it prints up to 10 lines by default and only printed 3.
+  (c) Raw $ dmesg / $ dmesg -T (without grep) omits the entire OOM dump between invoked oom-killer and Killed process (Call Trace, Mem-Info, task list, and on Linux 5.x+ where UID:/pgtables: exist, the oom-kill:constraint=... line).
+  (d) Raw $ cat commands on app.log (lines 143-151), gc.log (lines 153-156), and access-hourly.log (lines 179-189, which skips odd hours 01/03/05) output tiny excerpts rather than full files.
+  (e) Duplicate line IDs: [K-L1], [K-L2], [K-L4], [K-L5] are reused identically across three separate command outputs (lines 81-84, 88-91, 95-98).
+
+
+5. JVM Flag Semantics, Netty vs JDK Direct Buffers, and Spring Boot Actuator
+
+- MaxDirectMemorySize=3g misconfiguration on a 4 GB swapless host ([F-L1], [P-L3], [P-L4], [FR-L1], [FR-L2]):
+  With -Xmx1g (1 GiB) + -XX:MaxDirectMemorySize=3g (3 GiB) + ~300-400 MiB JVM native overhead + OS/daemons (~300-400 MiB) on 3933 MiB RAM with 0 swap, the JVM's direct memory limit can never be reached. The kernel OOM killer will always kill the JVM before Bits.reserveMemory throws OutOfMemoryError: Direct buffer memory (which is why app.log has no OOM stack trace). Leaving MaxDirectMemorySize=3g unaddressed in Q4 R2 leaves this trap intact.
+
+- Conceptual mismatch between JDK DirectByteBuffer, Netty ByteBuf, Actuator, NMT, and R2's "buffer release" diagnosis ([C-L1], [N-L8], [D-L4], Q4 R2):
+  (a) Standard Spring Boot Servlet filters (RequestBodyLoggingFilter, e.g., ContentCachingRequestWrapper) buffer request bodies in on-heap byte[] arrays, not direct buffers.
+  (b) If this is Spring WebFlux / Netty where buffers require explicit .release() (matching Q4 R2), Netty's PooledByteBufAllocator normally allocates 4 MiB or 16 MiB PoolChunks—not 21,877 small ~42.4 KB mallocs ([N-L8] malloc=926981KB #21877). Furthermore, when Netty uses allocateDirectNoCleaner() (Unsafe.allocateMemory directly), those buffers are NOT counted by BufferPoolMXBean / Micrometer jvm.buffer.memory.used?tag=id:direct ([C-L1]). (On Java 17 without --add-opens java.base/java.nio=ALL-UNNAMED, Netty falls back to ByteBuffer.allocateDirect() so it would appear in [C-L1], but PooledByteBufAllocator would still allocate large chunks rather than 21,877 tiny allocations.)
+  (c) Conversely, if the filter manually calls JDK ByteBuffer.allocateDirect(), it matches both [C-L1] and [N-L8] (#21877), but JDK DirectByteBuffer has no explicit release() method to "fix"—it is reclaimed by GC via Cleaner, meaning a leak requires retained strong references (or uncollected Old Gen objects, though CGC=8 shows concurrent Old Gen collection is running) rather than a missing release() call.
+  (d) Note also that 21,877 live allocations in [N-L8] after only ~500 receipt uploads since 05:47 ([X-L8]) implies ~40+ leaked allocations per upload, with no explanation in [D-L4].
+
+- Spring Boot Actuator JSON format errors ([C-L1], [C-L2]):
+  (a) In [C-L1] (query ?tag=id:direct), Spring Boot's MetricsEndpoint strips already-applied filter tags from availableTags; therefore availableTags must be [], not [{"tag":"id","values":["mapped","direct"]}]. In [C-L2] (?tag=area:heap), area IS stripped from availableTags, making [C-L1] and [C-L2] inconsistent with each other.
+  (b) Both [C-L1] and [C-L2] omit the standard "description" field returned by Spring Boot Actuator /actuator/metrics/{name}.
+  (c) On Java 17, BufferPoolMXBean typically exposes a third pool ("mapped - 'non-volatile memory'", added in JDK 14) alongside "direct" and "mapped".
+
+- Incomplete jcmd VM.flags output ([P-L4]):
+  Real jcmd <pid> VM.flags always prints all ergonomic and default-modified flags (e.g., CICompilerCount, ConcGCThreads, G1HeapRegionSize, ReservedCodeCacheSize, SegmentedCodeCache, UseCompressedOops, UseCompressedClassPointers), not just the 5 listed flags.
+
+- Incomplete jcmd GC.heap_info and NMT summary output ([H-L2], [N-L2]-[N-L9]):
+  Java 17 GC.heap_info prints a class space sub-line beneath Metaspace ([H-L2]), and NMT summary prints mmap/malloc/arena sub-lines beneath every category, not solely under Other ([N-L8]).
+
+
+6. Where the Evidence Supports More Than One Reasonable Answer
+
+- Q1 (which line IDs show termination):
+  The prompt does not specify whether to cite only the kernel ground-truth kill lines ([K-L2], [K-L5]), include the kernel invocation lines ([K-L1], [K-L4]), include systemd's OOM/SIGKILL exit records ([J-L1]-[J-L3], [J-L6]-[J-L8], [SYS-L4]), or report only the latest incident vs both. Moreover, [K-L1]/[K-L2]/[K-L4]/[K-L5] appear three separate times under different commands. Any subset separating kernel-only vs kernel+systemd is defensible depending on strictness.
+
+- Q3 (1-2 decisive line IDs for Q2):
+  Proving H3 requires establishing both (1) continuously growing off-heap direct memory with stable heap and (2) kernel OOM termination. Restricting to 1-2 lines makes multiple pairs equally reasonable:
+  - [M-L11] + [K-L2] (or [M-L16] + [K-L5]): links high direct memory / stable heap right before crash to kernel OOM kill of the same PID, though a single memstat line does not prove a trend.
+  - [M-L4] (or [M-L5]) + [M-L11]: proves continuous direct-buffer growth while heap stays flat, leaving OOM kill implicit.
+  - [C-L1] (or [N-L8]) + [K-L2]: pairs authoritative JVM-internal direct-buffer measurement with kernel OOM kill.
+  - [M-L18] + [H-L1] (or [C-L1] + [C-L2]): proves off-heap dominance over heap on the live process.
+
+- Q4 (R2's specific code-fix diagnosis vs what the evidence actually proves):
+  While rolling back v2.3.1 on point-api-02 is clearly the right immediate mitigation ([D-L3], [M-L4]->[M-L5]), the evidence does NOT actually prove that the leak is an unreleased direct buffer inside RequestBodyLoggingFilter:
+  - There is no NMT detail call stack, heap/direct dump, or code diff linking RequestBodyLoggingFilter ([D-L4]) to the NMT Other allocations ([N-L8]).
+  - The leak rate fails to scale with /v1/points/receipts volume ([X-L5]-[X-L8] vs [M-L5]-[M-L18]), leaving open that another undocumented change in v2.3.1 (e.g., a library upgrade or background task) or variable payload behavior is responsible.
+  - As noted above, if these are JDK DirectByteBuffers ([C-L1]), the fix is releasing retained references (not adding a buffer.release() call), and a complete remediation should also lower -XX:MaxDirectMemorySize (e.g., to 256m-512m) so direct-memory leaks fail fast inside the JVM rather than triggering silent kernel OOM kills.

@@ -1,7 +1,7 @@
 /**
  * Client-side state store backed by localStorage (key: csq:v2).
  * v1 data is ignored. Falls back to in-memory storage when localStorage is unavailable.
- * Contract defined in docs/SPEC.md section 6.
+ * Contract defined in docs/spec/SPEC.md section 6.
  */
 
 export const STORAGE_KEY = 'csq:v2';
