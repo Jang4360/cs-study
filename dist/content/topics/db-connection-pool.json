@@ -1,0 +1,96 @@
+{
+  "id": "db-connection-pool",
+  "domain": "db",
+  "order": 2,
+  "title": "커넥션 풀",
+  "summary": "DB 연결을 미리 만들어 두고 빌려 쓰는 구조와, 풀이 막히는 방식.",
+  "minutes": 6,
+  "keyword": "maximumPoolSize · connectionTimeout · maxLifetime",
+  "prerequisites": [
+    "db-commit"
+  ],
+  "definition": "커넥션 풀은 DB 연결을 미리 만들어 두고 요청마다 빌려 주고 돌려받는 구조다. 연결 생성 비용을 줄이지만, 풀이 비면 요청은 연결을 기다리다 타임아웃이 난다.",
+  "why": [
+    "DB가 한가한데 'Connection is not available, request timed out'이 나는 장애의 상당수는 풀 크기, 반납 누락, 한 요청이 연결을 여러 개 쥐는 구조에서 온다."
+  ],
+  "flow": {
+    "title": "연결을 빌리고 돌려주기",
+    "steps": [
+      {
+        "label": "대여",
+        "detail": "요청 스레드가 풀에서 연결을 빌린다. 없으면 connectionTimeout까지 기다린다."
+      },
+      {
+        "label": "사용",
+        "detail": "쿼리와 트랜잭션을 수행한다. 이 동안 연결은 다른 요청이 못 쓴다."
+      },
+      {
+        "label": "반납",
+        "detail": "트랜잭션이 끝나면 풀로 돌려준다. 반납이 누락되면 누수다."
+      },
+      {
+        "label": "교체",
+        "detail": "maxLifetime이 지난 연결은 닫고 새로 만든다. DB의 wait_timeout보다 짧게 둔다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "풀 크기를 크게 하면 항상 빨라진다.",
+      "right": "DB가 감당할 동시 실행 수에는 한계가 있다. 한 작업이 필요로 하는 연결 수와 스레드 수를 함께 계산한다."
+    },
+    {
+      "wrong": "풀 타임아웃은 DB가 느리다는 뜻이다.",
+      "right": "연결을 쥔 채 외부 호출을 기다리거나, 한 스레드가 연결 두 개를 동시에 요구하면 DB가 한가해도 풀이 마른다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "HikariCP에서 자주 보는 오류",
+      "code": "HikariPool-1 - Connection is not available, request timed out after 30000ms."
+    },
+    {
+      "caption": "풀 크기 산정 공식 (HikariCP 위키)",
+      "code": "pool size = Tn × (Cm − 1) + 1\nTn: 최대 스레드 수, Cm: 한 작업이 동시에 쥐는 최대 연결 수"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "스레드 10개, 한 작업이 동시에 연결 2개를 쥔다. 교착을 피하는 최소 풀 크기는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "10"
+        },
+        {
+          "id": "b",
+          "text": "11"
+        },
+        {
+          "id": "c",
+          "text": "20"
+        }
+      ],
+      "answer": "b",
+      "explanation": "10 × (2 − 1) + 1 = 11. 모든 스레드가 첫 연결을 쥔 상태에서도 한 스레드는 두 번째 연결을 얻어 끝낼 수 있다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "커넥션 누수",
+      "definition": "빌린 연결을 반납하지 않아 풀의 가용 연결이 줄어드는 현상."
+    },
+    {
+      "term": "maxLifetime",
+      "definition": "풀이 연결 하나를 유지하는 최대 시간. DB 쪽 타임아웃보다 짧아야 끊긴 연결을 쓰지 않는다."
+    }
+  ],
+  "relatedIncidents": [],
+  "sources": [
+    {
+      "title": "HikariCP Wiki: About Pool Sizing",
+      "url": "https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing"
+    }
+  ]
+}

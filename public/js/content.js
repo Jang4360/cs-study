@@ -17,7 +17,7 @@ async function fetchJson(url) {
 
 export function loadCatalog() {
   if (!catalogPromise) {
-    catalogPromise = fetchJson('/content/catalog.json');
+    catalogPromise = fetchJson('content/catalog.json');
   }
   return catalogPromise;
 }
@@ -28,7 +28,7 @@ export async function loadIncident(id) {
       const catalog = await loadCatalog();
       const stage = (catalog.quest?.stages || []).find((s) => s.id === id && s.file);
       if (!stage) return null;
-      return fetchJson(`/content/${stage.file}`);
+      return fetchJson(`content/${stage.file}`);
     })());
   }
   return incidentPromises.get(id);
@@ -51,7 +51,7 @@ export async function loadTopic(id) {
       const catalog = await loadCatalog();
       const ids = catalog.learn?.topics || [];
       if (!ids.includes(id)) return null;
-      return fetchJson(`/content/topics/${id}.json`);
+      return fetchJson(`content/topics/${id}.json`);
     })());
   }
   return topicPromises.get(id);

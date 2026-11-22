@@ -1,0 +1,119 @@
+{
+  "id": "os-jvm-memory",
+  "domain": "os",
+  "order": 3,
+  "title": "JVM 메모리는 힙만이 아니다",
+  "summary": "힙, 메타스페이스, 스레드, 다이렉트 버퍼 — 프로세스 메모리(RSS)를 이루는 것들.",
+  "minutes": 6,
+  "keyword": "$ jcmd <pid> VM.native_memory summary",
+  "prerequisites": [
+    "os-memory-oom"
+  ],
+  "definition": "JVM 프로세스의 메모리(RSS)는 힙(-Xmx) 외에 메타스페이스, 코드 캐시, 스레드 스택, GC 자료구조, 다이렉트 버퍼 같은 힙 밖 영역을 더한 것이다. 힙 그래프가 정상이어도 프로세스 전체는 계속 커질 수 있다.",
+  "why": [
+    "컨테이너나 VM의 메모리 한도는 RSS 기준으로 작동한다. 힙만 보고 판단하면 힙 밖 누수로 인한 OOM을 놓친다.",
+    "JVM 옵션의 한도 합(힙 + 다이렉트 + 기타)이 물리 메모리보다 크면, JVM이 오류를 내기 전에 커널이 먼저 프로세스를 죽인다."
+  ],
+  "flow": {
+    "title": "RSS를 이루는 영역",
+    "steps": [
+      {
+        "label": "Java Heap",
+        "detail": "객체가 사는 곳. -Xmx로 한도를 정하고 GC가 관리한다."
+      },
+      {
+        "label": "Metaspace·Code",
+        "detail": "클래스 정보와 JIT 컴파일된 코드."
+      },
+      {
+        "label": "Thread",
+        "detail": "스레드마다 스택(기본 1MB 안팎)."
+      },
+      {
+        "label": "Direct buffer (Other)",
+        "detail": "네트워크 I/O용 힙 밖 메모리. -XX:MaxDirectMemorySize가 한도. 해제를 잊으면 GC로도 회수되지 않는 누수가 된다."
+      },
+      {
+        "label": "합계 = RSS",
+        "detail": "ps·top의 RSS, 커널 OOM 로그의 anon-rss가 이 합을 보여 준다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "-Xmx를 키우면 메모리 문제가 해결된다.",
+      "right": "힙 밖이 원인이면 힙을 키울수록 남은 물리 메모리가 줄어 더 빨리 죽는다."
+    },
+    {
+      "wrong": "GC 로그가 정상이면 메모리 누수는 없다.",
+      "right": "GC는 힙만 관리한다. 다이렉트 버퍼·네이티브 메모리 누수는 GC 로그에 보이지 않는다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "영역별 메모리 보기 (NMT 켠 경우)",
+      "code": "java -XX:NativeMemoryTracking=summary ... \njcmd <pid> VM.native_memory summary\njcmd <pid> GC.heap_info"
+    },
+    {
+      "caption": "Spring Boot 메트릭",
+      "code": "curl -s localhost:8080/actuator/metrics/jvm.buffer.memory.used?tag=id:direct"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "-Xmx1g인데 커널 OOM 로그의 anon-rss가 3.5GB다. 가장 먼저 의심할 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "힙이 한도를 넘었다"
+        },
+        {
+          "id": "b",
+          "text": "힙 밖 메모리(다이렉트 버퍼 등)가 커졌다"
+        },
+        {
+          "id": "c",
+          "text": "디스크 캐시가 커졌다"
+        }
+      ],
+      "answer": "b",
+      "explanation": "힙은 1GB를 넘을 수 없다. 나머지 2.5GB는 힙 밖 영역이고, 프로세스 고유 메모리(anon-rss)라 디스크 캐시와도 다르다."
+    },
+    {
+      "id": "q2",
+      "prompt": "4GB 서버에서 -Xmx1g -XX:MaxDirectMemorySize=3g로 띄웠다. 다이렉트 버퍼가 새면 무엇이 먼저 일어날 가능성이 큰가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "JVM이 OutOfMemoryError: Direct buffer memory를 낸다"
+        },
+        {
+          "id": "b",
+          "text": "커널 OOM Killer가 프로세스를 죽인다"
+        }
+      ],
+      "answer": "b",
+      "explanation": "다이렉트 한도 3GB에 닿기 전에 힙과 다른 영역을 합친 RSS가 물리 메모리를 넘는다. 커널이 먼저 SIGKILL을 보낸다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "Metaspace",
+      "definition": "클래스 메타데이터를 담는 힙 밖 영역."
+    },
+    {
+      "term": "MaxDirectMemorySize",
+      "definition": "다이렉트 버퍼로 쓸 수 있는 힙 밖 메모리의 한도. 지정하지 않으면 보통 -Xmx와 같다."
+    }
+  ],
+  "relatedIncidents": [
+    "inc-003"
+  ],
+  "sources": [
+    {
+      "title": "Oracle: Native Memory Tracking",
+      "url": "https://docs.oracle.com/en/java/javase/17/vm/native-memory-tracking.html"
+    }
+  ]
+}

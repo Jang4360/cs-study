@@ -1,0 +1,94 @@
+{
+  "id": "infra-retry-idempotency",
+  "domain": "infra",
+  "order": 3,
+  "title": "재시도와 멱등성",
+  "summary": "결과를 모를 때 다시 보내도 안전하게 만드는 법.",
+  "minutes": 6,
+  "keyword": "Idempotency-Key: PTX-20261118-0421",
+  "prerequisites": [
+    "net-timeout"
+  ],
+  "definition": "멱등성은 같은 요청을 여러 번 처리해도 결과가 한 번 처리한 것과 같은 성질이다. 타임아웃처럼 결과를 모르는 상황에서 재시도를 안전하게 만든다.",
+  "why": [
+    "네트워크에서는 '요청이 갔는지', '응답이 왔는지'를 항상 알 수는 없다. 재시도는 필요하지만, 멱등하지 않으면 중복 처리가 된다."
+  ],
+  "flow": {
+    "title": "멱등키로 중복 막기",
+    "steps": [
+      {
+        "label": "첫 요청",
+        "detail": "클라이언트가 고유 키(거래번호 등)를 붙여 보낸다."
+      },
+      {
+        "label": "서버",
+        "detail": "키를 유니크 제약과 함께 저장하고 처리한다."
+      },
+      {
+        "label": "재시도",
+        "detail": "같은 키로 다시 오면 새로 처리하지 않고 저장된 결과를 돌려준다."
+      },
+      {
+        "label": "동시 도착",
+        "detail": "첫 요청이 처리 중이면 '처리 중'으로 응답하거나 기다리게 한다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "재시도 횟수만 제한하면 안전하다.",
+      "right": "한 번의 재시도도 중복을 만들 수 있다. 중복을 막는 것은 서버 쪽 멱등 처리다."
+    },
+    {
+      "wrong": "GET만 멱등하면 된다.",
+      "right": "결제·지급처럼 상태를 바꾸는 POST에 오히려 멱등 설계가 더 필요하다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "DB에서 중복을 막는 최소 장치",
+      "code": "ALTER TABLE point_grant ADD CONSTRAINT uk_partner_tx UNIQUE (partner_tx_id);"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "제휴사가 타임아웃 후 같은 거래번호로 재전송했다. 서버가 멱등하다면 올바른 동작은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "새로 지급하고 200"
+        },
+        {
+          "id": "b",
+          "text": "기존 지급 결과(G-88120)를 그대로 돌려준다"
+        },
+        {
+          "id": "c",
+          "text": "무조건 409 오류"
+        }
+      ],
+      "answer": "b",
+      "explanation": "같은 키의 재요청에는 처음 처리 결과를 돌려준다. 클라이언트는 결과를 알게 되고 중복도 생기지 않는다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "멱등성",
+      "definition": "여러 번 수행해도 한 번 수행한 것과 결과가 같은 성질."
+    },
+    {
+      "term": "멱등키",
+      "definition": "재시도 요청이 같은 요청임을 서버가 알아보도록 클라이언트가 붙이는 고유 키."
+    }
+  ],
+  "relatedIncidents": [
+    "inc-001"
+  ],
+  "sources": [
+    {
+      "title": "RFC 9110 §9.2.2 Idempotent Methods",
+      "url": "https://www.rfc-editor.org/rfc/rfc9110#section-9.2.2"
+    }
+  ]
+}

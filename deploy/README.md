@@ -1,55 +1,15 @@
-# OCI-2 배포 가이드 (systemd --user + Tailscale)
+# 배포 (OCI-2)
 
-이 서비스는 공용 인터넷(`0.0.0.0`)에 노출하지 않고, Tailscale 내부 IP(`100.x.y.z`)와 포트 `8790`에만 바인딩하여 실행합니다.
+흐름(2026-11-22 사용자 확인):
+1. OCI-1에서 작업하고 GitHub `main`에 push한다.
+2. OCI-2의 systemd 타이머 `site-pull.timer`가 2분마다 site-pull 스크립트를 실행한다.
+3. 스크립트가 저장소를 `git fetch`해 `main` 최신 커밋으로 맞춘다.
+4. 저장소에 `dist/index.html`이 있으면 nginx가 `dist/`를, 없으면 저장소 루트를 서비스한다.
 
-## 1. Tailscale IPv4 주소 확인
+그래서 이 저장소는 **`dist/`를 커밋한다.**
+- `npm run build` = 콘텐츠 검사 + `public/` 와 `content/` 를 `dist/` 로 복사(scripts/build-dist.mjs).
+- push 전에 반드시 `npm run build` 후 `dist/` 변경까지 커밋한다. 안 하면 OCI-2에는 이전 화면이 남는다.
+- `dist/` 에는 `docs/`·`tests/`·`server/` 가 들어가지 않는다(초안·교차검증 기록 비공개 유지).
+- 화면은 상대 경로로 자원을 불러오므로 nginx가 어떤 URL 경로에 붙여도 동작한다.
 
-OCI-2 서버에서 아래 명령으로 Tailscale IPv4 주소를 확인합니다.
-
-```bash
-tailscale ip -4
-```
-
-예시 출력: `100.64.12.34`
-
-## 2. 유닛 파일 설치 및 IP 설정
-
-`deploy/cs-quest.service`를 사용자 systemd 디렉터리로 복사하고 `<TAILSCALE_IP>`를 위에서 확인한 IP로 교체합니다.
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp /srv/orca/cs-study/deploy/cs-quest.service ~/.config/systemd/user/cs-quest.service
-TS_IP=$(tailscale ip -4 | head -n 1)
-sed -i "s/<TAILSCALE_IP>/${TS_IP}/g" ~/.config/systemd/user/cs-quest.service
-```
-
-설정 확인:
-
-```bash
-cat ~/.config/systemd/user/cs-quest.service
-```
-
-`Environment=HOST=100.x.y.z`, `Environment=PORT=8790`, `Restart=on-failure`가 올바르게 들어갔는지 확인합니다.
-
-## 3. 서비스 등록 및 시작
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now cs-quest.service
-```
-
-로그아웃 후에도 서비스가 유지되도록 linger가 꺼져 있다면 활성화합니다(필요 시 관리자 권한으로 1회):
-
-```bash
-loginctl enable-linger "$USER"
-```
-
-## 4. 상태 및 응답 확인
-
-```bash
-systemctl --user status cs-quest.service
-curl -I "http://$(tailscale ip -4 | head -n 1):8790/"
-```
-
-HTTP `200 OK`와 `X-Content-Type-Options: nosniff` 헤더가 보이면 정상입니다.
-같은 Tailscale 네트워크에 연결된 기기의 브라우저에서 `http://<TAILSCALE_IP>:8790/`로 접속합니다.
+OCI-2의 접속 주소와 nginx 경로는 OCI-2 쪽 설정이라 이 저장소에서 확인할 수 없다. 확인되면 여기 적는다.

@@ -1,0 +1,89 @@
+{
+  "id": "db-commit",
+  "domain": "db",
+  "order": 1,
+  "title": "트랜잭션 커밋과 내구성",
+  "summary": "커밋 이후의 변경이 왜 응답 실패와 상관없이 남는가.",
+  "minutes": 5,
+  "keyword": "COMMIT;",
+  "prerequisites": [],
+  "definition": "커밋은 트랜잭션의 변경을 확정하는 시점이다. 커밋이 끝나면 그 뒤에 애플리케이션이 죽거나 응답 전달이 실패해도 변경은 DB에 남는다(내구성).",
+  "why": [
+    "'응답이 실패했다'와 '처리가 실패했다'는 다르다. 커밋 시점이 응답보다 앞에 있으면, 응답 실패와 무관하게 업무는 확정된다.",
+    "그래서 업무 처리 여부의 최종 확인은 DB 기록으로 한다."
+  ],
+  "flow": {
+    "title": "커밋과 응답의 순서",
+    "steps": [
+      {
+        "label": "BEGIN",
+        "detail": "트랜잭션 시작."
+      },
+      {
+        "label": "INSERT/UPDATE",
+        "detail": "변경은 아직 이 트랜잭션 안에서만 보인다."
+      },
+      {
+        "label": "COMMIT",
+        "detail": "변경 확정. 다른 트랜잭션에서도 보이고, 장애 후에도 남는다."
+      },
+      {
+        "label": "후속 작업",
+        "detail": "알림 호출, 응답 작성 등. 여기서 실패해도 커밋은 되돌아가지 않는다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "API가 실패 응답을 줬으니 DB도 롤백됐다.",
+      "right": "커밋 후의 실패는 롤백을 일으키지 않는다. 커밋 전후 어디서 실패했는지 봐야 한다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "업무 결과 직접 확인",
+      "code": "SELECT grant_id, status, created_at\n  FROM point_grant\n WHERE partner_tx_id = 'PTX-20261118-0421';"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "로그에 'tx committed' 후 'response write failed'가 있다. 업무 상태는?",
+      "options": [
+        {
+          "id": "a",
+          "text": "롤백됐다"
+        },
+        {
+          "id": "b",
+          "text": "확정됐다"
+        },
+        {
+          "id": "c",
+          "text": "알 수 없다"
+        }
+      ],
+      "answer": "b",
+      "explanation": "커밋 이후의 응답 실패는 커밋을 되돌리지 않는다. 확인은 DB 조회로 마무리한다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "커밋",
+      "definition": "트랜잭션의 변경을 확정하는 시점."
+    },
+    {
+      "term": "내구성",
+      "definition": "커밋된 변경은 장애가 나도 사라지지 않는다는 트랜잭션 성질(ACID의 D)."
+    }
+  ],
+  "relatedIncidents": [
+    "inc-001"
+  ],
+  "sources": [
+    {
+      "title": "MySQL: InnoDB and the ACID Model",
+      "url": "https://dev.mysql.com/doc/refman/8.4/en/mysql-acid.html"
+    }
+  ]
+}
