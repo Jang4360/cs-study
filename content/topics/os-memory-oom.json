@@ -1,0 +1,93 @@
+{
+  "id": "os-memory-oom",
+  "domain": "os",
+  "order": 2,
+  "title": "메모리와 OOM Killer",
+  "summary": "프로세스가 '갑자기 죽었다'면 커널이 죽였을 수 있다.",
+  "minutes": 6,
+  "keyword": "$ dmesg -T | grep -i 'killed process'",
+  "prerequisites": [],
+  "definition": "물리 메모리가 바닥나면 리눅스 커널의 OOM Killer가 점수가 높은 프로세스를 강제로 종료한다. 컨테이너에서는 메모리 limit을 넘으면 같은 방식으로 종료(OOMKilled)된다.",
+  "why": [
+    "애플리케이션 로그에는 아무 흔적 없이 프로세스가 사라진다. 커널 로그를 봐야 원인이 보인다.",
+    "JVM 힙만 보면 놓친다. 프로세스 전체 메모리(RSS)에는 힙 밖 메모리(다이렉트 버퍼, 스레드 스택 등)도 포함된다."
+  ],
+  "flow": {
+    "title": "OOM으로 죽기까지",
+    "steps": [
+      {
+        "label": "사용량 증가",
+        "detail": "누수나 부하로 RSS가 계속 오른다."
+      },
+      {
+        "label": "회수 시도",
+        "detail": "커널이 캐시를 비우고 회수를 시도한다."
+      },
+      {
+        "label": "OOM 발생",
+        "detail": "더 회수할 수 없으면 OOM Killer가 프로세스를 고른다."
+      },
+      {
+        "label": "기록",
+        "detail": "dmesg/커널 로그에 'Out of memory: Killed process ...'가 남는다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "힙 사용량이 정상이니 메모리 문제는 아니다.",
+      "right": "RSS와 힙은 다르다. 다이렉트 버퍼 누수는 힙 그래프에 보이지 않는다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "OOM 흔적 찾기",
+      "code": "dmesg -T | grep -iE 'out of memory|killed process'\njournalctl -k --since '1 hour ago' | grep -i oom\nkubectl describe pod <pod> | grep -i -A2 'last state'"
+    },
+    {
+      "caption": "메모리 현황",
+      "code": "free -m\nps -o pid,rss,cmd -p <pid>"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "앱 로그 마지막 줄 이후 아무 오류 없이 프로세스가 사라졌다. 가장 먼저 볼 것은?",
+      "options": [
+        {
+          "id": "a",
+          "text": "커널 로그(dmesg)"
+        },
+        {
+          "id": "b",
+          "text": "DB 슬로우 쿼리 로그"
+        },
+        {
+          "id": "c",
+          "text": "게이트웨이 접근 로그"
+        }
+      ],
+      "answer": "a",
+      "explanation": "애플리케이션이 스스로 남기지 못한 종료는 커널이나 컨테이너 런타임 기록에 남는다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "RSS",
+      "definition": "프로세스가 실제로 점유한 물리 메모리 크기."
+    },
+    {
+      "term": "OOM Killer",
+      "definition": "메모리가 고갈되면 커널이 프로세스를 골라 강제 종료하는 장치."
+    }
+  ],
+  "relatedIncidents": [
+    "inc-003"
+  ],
+  "sources": [
+    {
+      "title": "Linux kernel docs: Out Of Memory handling",
+      "url": "https://www.kernel.org/doc/gorman/html/understand/understand016.html"
+    }
+  ]
+}

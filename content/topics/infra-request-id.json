@@ -1,0 +1,89 @@
+{
+  "id": "infra-request-id",
+  "domain": "infra",
+  "order": 1,
+  "title": "요청 식별자와 로그 상관관계",
+  "summary": "여러 시스템의 로그를 시각이 아니라 ID로 잇는 법.",
+  "minutes": 5,
+  "keyword": "X-Request-ID: gw-7f3a91",
+  "prerequisites": [],
+  "definition": "요청 식별자는 요청 하나에 붙는 고유 ID다. 게이트웨이가 부여하고 하위 시스템이 로그에 함께 남기면, 서로 다른 시스템의 기록을 한 요청 단위로 묶을 수 있다.",
+  "why": [
+    "동시에 많은 요청이 오가면 시각만으로는 어떤 기록이 같은 요청인지 알 수 없다. 보낸 순서와 도착 순서도 다를 수 있다.",
+    "외부 거래번호와 내부 요청 ID가 한 줄에 함께 찍힌 기록이 두 세계를 잇는 다리가 된다."
+  ],
+  "flow": {
+    "title": "ID가 전파되는 경로",
+    "steps": [
+      {
+        "label": "게이트웨이",
+        "detail": "요청에 X-Request-ID를 부여하고 접근 로그에 남긴다."
+      },
+      {
+        "label": "애플리케이션",
+        "detail": "헤더의 ID를 받아 MDC(로그 컨텍스트)에 넣는다. 이후 모든 로그 줄에 자동으로 붙는다."
+      },
+      {
+        "label": "하위 호출",
+        "detail": "DB·외부 API 호출 시 같은 ID를 헤더로 넘긴다."
+      },
+      {
+        "label": "조사",
+        "detail": "ID 하나로 전 구간의 기록을 검색한다."
+      }
+    ]
+  },
+  "misconceptions": [
+    {
+      "wrong": "비슷한 시각의 실패 로그가 그 요청의 결과다.",
+      "right": "같은 고객사, 같은 API, 1초 차이여도 다른 요청일 수 있다. ID로 확인한다."
+    }
+  ],
+  "inPractice": [
+    {
+      "caption": "ID로 여러 로그 한 번에 찾기",
+      "code": "grep 'gw-7f3a91' gateway/access.log app/application.log"
+    }
+  ],
+  "checks": [
+    {
+      "id": "q1",
+      "prompt": "외부 거래번호로 내부 요청을 찾으려면 어떤 기록이 필요한가?",
+      "options": [
+        {
+          "id": "a",
+          "text": "거래번호와 내부 요청 ID가 함께 찍힌 기록"
+        },
+        {
+          "id": "b",
+          "text": "거래번호가 찍힌 시각과 가장 가까운 기록"
+        },
+        {
+          "id": "c",
+          "text": "오류가 난 기록"
+        }
+      ],
+      "answer": "a",
+      "explanation": "두 식별자가 한 줄에 함께 있어야 확실하게 연결된다."
+    }
+  ],
+  "terms": [
+    {
+      "term": "상관관계 ID",
+      "definition": "여러 시스템에 걸친 한 요청의 기록을 묶기 위한 공통 식별자."
+    },
+    {
+      "term": "MDC",
+      "definition": "스레드별 로그 컨텍스트. 넣어 둔 값이 그 스레드의 로그 줄에 자동으로 붙는다."
+    }
+  ],
+  "relatedIncidents": [
+    "inc-001"
+  ],
+  "sources": [
+    {
+      "title": "W3C Trace Context",
+      "url": "https://www.w3.org/TR/trace-context/"
+    }
+  ]
+}

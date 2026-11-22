@@ -1,0 +1,16 @@
+{
+  "name": "cs-study",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/server.mjs",
+    "validate": "node scripts/validate-content.mjs",
+    "test:unit": "timeout 60 node --test tests/acceptance/grading.test.mjs tests/acceptance/competency.test.mjs tests/acceptance/terminal-engine.test.mjs tests/unit/*.test.mjs",
+    "test:e2e": "timeout 600 npx playwright test -c tests/acceptance/playwright.config.cjs --reporter=line",
+    "test": "npm run validate && npm run test:unit && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

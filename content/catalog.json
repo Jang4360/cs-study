@@ -1,0 +1,158 @@
+{
+  "productName": "인시던트 랩 (가칭)",
+  "domains": [
+    {
+      "id": "os",
+      "label": "OS",
+      "description": "프로세스, 메모리, 파일 디스크립터, CPU와 인터럽트"
+    },
+    {
+      "id": "network",
+      "label": "네트워크",
+      "description": "DNS, TCP, TLS, HTTP와 요청이 지나는 구간"
+    },
+    {
+      "id": "infra",
+      "label": "인프라",
+      "description": "게이트웨이, 배포, 관측, 재시도와 장애 전파"
+    },
+    {
+      "id": "db",
+      "label": "DB",
+      "description": "트랜잭션, 락, 커넥션 풀, 정합성"
+    },
+    {
+      "id": "ai",
+      "label": "AI",
+      "description": "AI 제안의 검증, 도구 호출, 평가 (준비 중)"
+    }
+  ],
+  "competency": {
+    "rule": "임시 산식: 학습 완료 1점 · 사건 도움 해결 2점 · 독립 해결 3점 (주 분야), 보조 분야 +1점. 분야당 최대 10점.",
+    "learnPoints": 1,
+    "questAssisted": 2,
+    "questIndependent": 3,
+    "secondaryBonus": 1,
+    "maxPerDomain": 10
+  },
+  "quest": {
+    "season": "시즌 1 · 요청이 실패했다고 들었을 때",
+    "stages": [
+      {
+        "id": "inc-001",
+        "file": "incidents/inc-001.json",
+        "requires": []
+      },
+      {
+        "id": "inc-002",
+        "title": "두 번 지급된 포인트",
+        "domain": "db",
+        "board": "request-flow",
+        "requires": [
+          "inc-001"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-003",
+        "file": "incidents/inc-003.json",
+        "requires": [
+          "inc-001"
+        ]
+      },
+      {
+        "id": "inc-004",
+        "title": "6시 이벤트, DB 연결이 안 된다",
+        "domain": "network",
+        "board": "terminal",
+        "requires": [
+          "inc-003"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-005",
+        "title": "풀은 넉넉한데 커넥션이 없다",
+        "domain": "db",
+        "board": "pool",
+        "requires": [
+          "inc-004"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-006",
+        "title": "배포 직후에만 느리다",
+        "domain": "infra",
+        "board": "timeline",
+        "requires": [
+          "inc-005"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-007",
+        "title": "같은 파일이 두 번 왔어요",
+        "domain": "infra",
+        "board": "timeline",
+        "requires": [
+          "inc-006"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-008",
+        "title": "헬스체크가 서버를 내렸다",
+        "domain": "infra",
+        "board": "request-flow",
+        "requires": [
+          "inc-007"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-009",
+        "title": "주말마다 5xx, 증설하면 낫는다",
+        "domain": "network",
+        "board": "packet",
+        "requires": [
+          "inc-008"
+        ],
+        "available": false
+      },
+      {
+        "id": "inc-010",
+        "title": "CPU는 한가한데 커밋이 느리다",
+        "domain": "os",
+        "board": "terminal",
+        "requires": [
+          "inc-009"
+        ],
+        "available": false
+      }
+    ]
+  },
+  "boards": {
+    "request-flow": "요청 흐름 뷰어",
+    "terminal": "터미널",
+    "pool": "커넥션 풀 보드",
+    "timeline": "타임라인 보드",
+    "packet": "패킷 보드"
+  },
+  "learn": {
+    "topics": [
+      "net-request-journey",
+      "net-timeout",
+      "net-connection-close",
+      "infra-request-id",
+      "infra-sync-call",
+      "infra-retry-idempotency",
+      "db-commit",
+      "db-connection-pool",
+      "os-process-fd",
+      "os-memory-oom",
+      "os-jvm-memory",
+      "infra-canary-rollback"
+    ]
+  }
+}

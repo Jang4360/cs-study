@@ -1,0 +1,823 @@
+{
+  "id": "inc-001",
+  "order": 1,
+  "title": "타임아웃 났는데, 처리된 건가요?",
+  "summary": "고객사는 타임아웃을 받았다. 실제로 포인트가 지급됐는지 증거로 판단한다.",
+  "domains": {
+    "primary": "network",
+    "secondary": [
+      "db",
+      "infra"
+    ]
+  },
+  "estimatedMinutes": 15,
+  "prerequisites": [],
+  "dataNature": "simulated",
+  "simulationNotice": "이 사건의 회사, 시스템, 로그, 수치는 모두 학습용 가상 자료입니다.",
+  "verification": {
+    "verifiedAt": "2026-11-20",
+    "method": "로컬 재현 실험(Python 소켓 서버 + SQLite + 3초 read timeout 클라이언트)으로 '커밋 후 지연 → 클라이언트 타임아웃 → 서버 응답 쓰기 Broken pipe → DB 행 유지'를 확인. 게이트웨이 499는 nginx 계열 관례이며 재현에 포함하지 않음.",
+    "techNotes": "HTTP 상태 499는 nginx 고유 코드이며, nginx 접근 로그의 기본 시각은 요청 완료 시점이다. 서버 쪽 Broken pipe는 프록시가 상류 연결을 닫은 뒤 응답을 나눠 쓸 때 주로 관찰되며, 작은 응답에서는 오류 없이 지나갈 수도 있다. 교차 검증: 정답지를 보지 않은 별도 모델 세션이 같은 결론(H3, R2, cp1=E2-L1+E3-L1)을 냈고, 지적된 로그 사실성 문제(완료 시각, request_time, 예외 메시지, p95 산술)를 반영함(2026-11-20)."
+  },
+  "learningGoals": [
+    "타임아웃은 기다리던 쪽의 판단이며 상대 처리의 실패를 뜻하지 않는다는 것을 구분한다.",
+    "여러 시스템의 로그를 시각이 아니라 요청 식별자로 연결한다.",
+    "업무 처리 여부를 최종 기록(DB)으로 확인하고, 재전송의 중복 위험을 판단한다."
+  ],
+  "intake": {
+    "messages": [
+      {
+        "from": "팀장",
+        "time": "14:20",
+        "text": "제휴사 A에서 포인트 지급 요청이 실패했다고 연락 왔어요. 재전송해도 되냐고 묻는데, 실제로 처리됐는지부터 확인해 주세요."
+      }
+    ],
+    "ticket": {
+      "id": "T-1042",
+      "reporter": "제휴사 A",
+      "fields": [
+        {
+          "label": "발생 시각",
+          "value": "2026-11-18 14:02:14"
+        },
+        {
+          "label": "거래번호",
+          "value": "PTX-20261118-0421"
+        },
+        {
+          "label": "현상",
+          "value": "응답 없음, Read timed out (read timeout 설정 3초)"
+        },
+        {
+          "label": "문의",
+          "value": "재전송해도 되나요?"
+        }
+      ]
+    }
+  },
+  "system": {
+    "diagram": "[제휴사 A 시스템] ──HTTPS──▶ [API 게이트웨이] ──▶ [포인트 서버] ──▶ [DB]\n                                                    │\n                                                    └─(동기 호출)─▶ [알림 서비스]",
+    "notes": [
+      "포인트 서버는 지급을 DB에 커밋한 뒤, 알림 서비스를 동기로 호출하고 나서 응답한다.",
+      "게이트웨이는 요청마다 req ID를 붙여 포인트 서버로 전달한다."
+    ]
+  },
+  "hypotheses": [
+    {
+      "id": "H1",
+      "text": "요청이 우리 서버에 도달하지 않았다"
+    },
+    {
+      "id": "H2",
+      "text": "도달했지만 처리에 실패했다"
+    },
+    {
+      "id": "H3",
+      "text": "처리는 끝났지만 응답이 전달되지 않았다"
+    },
+    {
+      "id": "H4",
+      "text": "아직 판단할 수 없다"
+    }
+  ],
+  "cards": [
+    {
+      "id": "timeout",
+      "term": "타임아웃",
+      "definition": "정해진 시간 안에 응답을 받지 못한 상태. 기다리던 쪽이 기다리기를 멈췄다는 뜻이며, 상대 시스템의 처리가 실패했다는 뜻은 아니다.",
+      "topic": "net-timeout"
+    },
+    {
+      "id": "request-id",
+      "term": "요청 식별자",
+      "definition": "한 요청에 붙는 고유 ID. 여러 시스템의 로그를 시각이 아니라 ID로 이어 볼 수 있게 한다.",
+      "topic": "infra-request-id"
+    },
+    {
+      "id": "commit",
+      "term": "트랜잭션 커밋",
+      "definition": "DB 변경을 확정하는 시점. 커밋 이후에는 응답 전달이 실패해도 변경은 남는다.",
+      "topic": "db-commit"
+    },
+    {
+      "id": "client-closed",
+      "term": "클라이언트 연결 종료 (499)",
+      "definition": "서버가 응답하기 전에 요청한 쪽이 연결을 끊은 상태. 499는 nginx 계열 게이트웨이가 쓰는 코드다. 서버 쪽 처리는 계속될 수 있다.",
+      "topic": "net-connection-close"
+    },
+    {
+      "id": "broken-pipe",
+      "term": "Broken pipe",
+      "definition": "이미 닫힌 연결에 데이터를 쓰려 할 때 나는 오류. 서버가 응답을 보내려 했지만 받을 상대가 없었다는 뜻이다.",
+      "topic": "net-connection-close"
+    },
+    {
+      "id": "sync-call",
+      "term": "동기 호출",
+      "definition": "호출한 쪽이 결과가 올 때까지 기다리는 방식. 호출된 쪽이 느려지면 전체 응답도 느려진다.",
+      "topic": "infra-sync-call"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "E1",
+      "title": "고객사 티켓 원문",
+      "oneLine": "제휴사 A가 보낸 장애 신고",
+      "kind": "text",
+      "caption": "티켓 #T-1042 (제휴사 A 작성)",
+      "cards": [
+        "timeout"
+      ],
+      "lines": [
+        {
+          "id": "E1-L1",
+          "text": "발생 시각: 2026-11-18 14:02:14"
+        },
+        {
+          "id": "E1-L2",
+          "text": "거래번호: PTX-20261118-0421"
+        },
+        {
+          "id": "E1-L3",
+          "text": "현상: 포인트 지급 API 응답 없음 — java.net.SocketTimeoutException: Read timed out (read timeout 설정 3초)"
+        },
+        {
+          "id": "E1-L4",
+          "text": "문의: 실패한 것 같은데 같은 거래를 재전송해도 되나요?"
+        }
+      ]
+    },
+    {
+      "id": "E2",
+      "title": "게이트웨이 접근 로그",
+      "oneLine": "14:02 전후 API 게이트웨이 기록 발췌",
+      "kind": "log",
+      "caption": "api-gateway access.log 발췌 (nginx 계열, 가상) — 시각은 요청이 끝나 로그가 기록된 시점",
+      "cards": [
+        "request-id",
+        "client-closed"
+      ],
+      "lines": [
+        {
+          "id": "E2-L2",
+          "text": "14:02:12.341 req=gw-7f3a9c POST /v1/points/grant client=partner-A status=400 request_time=0.041"
+        },
+        {
+          "id": "E2-L3",
+          "text": "14:02:13.892 req=gw-7f3aa2 GET  /v1/points/balance client=partner-B status=200 request_time=0.022"
+        },
+        {
+          "id": "E2-L1",
+          "text": "14:02:14.128 req=gw-7f3a91 POST /v1/points/grant client=partner-A status=499 request_time=3.008"
+        }
+      ]
+    },
+    {
+      "id": "E3",
+      "title": "포인트 서버 앱 로그",
+      "oneLine": "포인트 서버 애플리케이션 로그",
+      "kind": "log",
+      "caption": "point-server application.log 발췌 (가상)",
+      "cards": [
+        "request-id",
+        "commit",
+        "sync-call",
+        "broken-pipe"
+      ],
+      "lines": [
+        {
+          "id": "E3-L1",
+          "text": "14:02:11.145 INFO [req=gw-7f3a91 ptx=PTX-20261118-0421] grant request received amount=5000"
+        },
+        {
+          "id": "E3-L2",
+          "text": "14:02:11.402 INFO [req=gw-7f3a91] tx committed grantId=G-88120"
+        },
+        {
+          "id": "E3-L3",
+          "text": "14:02:11.405 INFO [req=gw-7f3a91] notify-service call start"
+        },
+        {
+          "id": "E3-L4",
+          "text": "14:02:12.318 WARN [req=gw-7f3a9c ptx=PTX-20261118-0422] grant rejected at validation: INVALID_MEMBER"
+        },
+        {
+          "id": "E3-L5",
+          "text": "14:02:15.890 WARN [req=gw-7f3a91] notify-service slow response 4485ms"
+        },
+        {
+          "id": "E3-L6",
+          "text": "14:02:15.903 WARN [req=gw-7f3a91] response write failed: Broken pipe"
+        }
+      ]
+    },
+    {
+      "id": "E4",
+      "title": "DB 조회 결과",
+      "oneLine": "거래번호로 지급 테이블을 조회한 결과",
+      "kind": "table",
+      "caption": "SELECT grant_id, partner_tx_id, status, created_at FROM point_grant WHERE partner_tx_id = 'PTX-20261118-0421';",
+      "cards": [
+        "commit"
+      ],
+      "lines": [
+        {
+          "id": "E4-L1",
+          "text": "G-88120 | PTX-20261118-0421 | GRANTED | 2026-11-18 14:02:11.398"
+        }
+      ]
+    },
+    {
+      "id": "E5",
+      "title": "구간별 타임아웃 설정",
+      "oneLine": "각 구간에서 얼마나 기다리는지",
+      "kind": "text",
+      "caption": "설정 현황 (가상)",
+      "cards": [
+        "timeout"
+      ],
+      "lines": [
+        {
+          "id": "E5-L1",
+          "text": "제휴사 A 클라이언트 → 게이트웨이 read timeout: 3초 (제휴사 회신)"
+        },
+        {
+          "id": "E5-L2",
+          "text": "게이트웨이 → 포인트 서버 upstream read timeout: 30초"
+        },
+        {
+          "id": "E5-L3",
+          "text": "포인트 서버 → 알림 서비스 호출 timeout: 10초"
+        },
+        {
+          "id": "E5-L4",
+          "text": "포인트 서버 → DB 쿼리 timeout: 5초"
+        }
+      ]
+    },
+    {
+      "id": "E6",
+      "title": "모니터링 대시보드 요약",
+      "oneLine": "14:00~14:10 주요 지표",
+      "kind": "metric",
+      "caption": "모니터링 요약 (가상)",
+      "cards": [
+        "sync-call"
+      ],
+      "lines": [
+        {
+          "id": "E6-L1",
+          "text": "포인트 서버 CPU 사용률: 평균 22% (평소와 비슷)"
+        },
+        {
+          "id": "E6-L2",
+          "text": "포인트 서버 DB 커넥션 풀 사용: 최대 6/20"
+        },
+        {
+          "id": "E6-L3",
+          "text": "알림 서비스 응답시간 p95: 평소 120ms → 14:01~14:09 4.1~4.6초"
+        },
+        {
+          "id": "E6-L4",
+          "text": "포인트 지급 API 처리시간 p95 (포인트 서버 측정): 평소 350ms → 14:01~14:09 4.4~4.9초"
+        }
+      ]
+    }
+  ],
+  "checkpoints": [
+    {
+      "id": "cp1",
+      "title": "같은 요청 찾기",
+      "prompt": "티켓의 거래(PTX-20261118-0421)와 같은 요청을 우리 시스템 로그에서 찾았나요? 근거가 되는 로그 줄을 고르세요.",
+      "rationalePrompt": "어떻게 같은 요청이라고 판단했나요? (한두 문장)",
+      "countsTowardOutcome": false,
+      "evidenceRule": {
+        "allOf": [
+          "E3-L1",
+          "E2-L1"
+        ],
+        "noneOf": [
+          "E2-L2",
+          "E3-L4"
+        ]
+      },
+      "patterns": [
+        {
+          "id": "picked-other-tx",
+          "when": {
+            "anyOf": [
+              "E2-L2",
+              "E3-L4"
+            ]
+          },
+          "feedback": "고른 줄 중에 다른 거래(PTX-20261118-0422, req=gw-7f3a9c)의 기록이 섞여 있습니다. 시각이 가깝다고 같은 요청은 아닙니다.",
+          "suggestTopic": "infra-request-id"
+        },
+        {
+          "id": "missing-ptx-line",
+          "when": {
+            "noneOf": [
+              "E3-L1"
+            ]
+          },
+          "feedback": "거래번호(ptx)와 게이트웨이 req ID가 한 줄에 함께 찍힌 곳이 있습니다. 그 줄이 두 시스템을 잇는 다리입니다.",
+          "suggestTopic": "infra-request-id"
+        },
+        {
+          "id": "missing-gw-line",
+          "when": {
+            "noneOf": [
+              "E2-L1"
+            ]
+          },
+          "feedback": "게이트웨이에서도 같은 req ID의 기록을 찾아 연결해 보세요. 고객사 쪽에서 무슨 일이 있었는지 알려 줍니다."
+        }
+      ],
+      "passFeedback": "E3 첫 줄에 거래번호와 req=gw-7f3a91이 함께 찍혀 있고, 같은 req ID가 게이트웨이 로그(E2의 499 줄)에도 있습니다. 시각이 아니라 ID로 연결했습니다."
+    },
+    {
+      "id": "cp2",
+      "title": "최종 판단",
+      "prompt": "이 거래의 실제 상태와 고객사에 줄 답을 정하세요.",
+      "rationalePrompt": "그렇게 판단한 결정적 근거는? (한두 문장)",
+      "countsTowardOutcome": true,
+      "stateQuestion": {
+        "prompt": "이 요청의 실제 상태는?",
+        "options": [
+          "H1",
+          "H2",
+          "H3",
+          "H4"
+        ],
+        "answer": "H3",
+        "wrongFeedback": {
+          "H1": "포인트 서버 로그에 이 거래번호가 찍혀 있습니다. 요청은 도달했습니다.",
+          "H2": "고객사가 받은 것은 타임아웃입니다. 우리 쪽 처리 결과를 보여 주는 기록을 다시 확인해 보세요.",
+          "H4": "판단에 필요한 기록이 이미 증거 목록에 있습니다. 업무 결과를 직접 보여 주는 증거를 찾아보세요."
+        }
+      },
+      "evidenceQuestion": {
+        "prompt": "결정적 근거가 되는 줄을 1~2개 고르세요.",
+        "rule": {
+          "anyOf": [
+            "E4-L1",
+            "E3-L2"
+          ],
+          "noneOf": [
+            "E2-L2",
+            "E3-L4"
+          ]
+        },
+        "maxSelections": 2,
+        "wrongFeedback": "고른 줄만으로는 지급이 확정됐는지 알 수 없거나, 다른 거래의 기록이 섞여 있습니다. 지급이 '확정'됐음을 보여 주는 기록을 고르세요.",
+        "passNotes": [
+          {
+            "when": {
+              "noneOf": [
+                "E4-L1"
+              ]
+            },
+            "note": "앱 로그의 'tx committed'도 강한 근거입니다. 다만 업무 사실의 최종 확인은 DB 기록으로 하는 습관을 들이세요."
+          }
+        ]
+      },
+      "replyQuestion": {
+        "prompt": "제휴사의 '재전송해도 되나요?'에 뭐라고 답하나요?",
+        "options": [
+          {
+            "id": "R1",
+            "text": "재전송하라"
+          },
+          {
+            "id": "R2",
+            "text": "재전송하지 말라. 이미 처리됐다고 거래번호와 지급 ID(G-88120)로 회신한다"
+          },
+          {
+            "id": "R3",
+            "text": "판단을 보류하고 추가 확인을 요청한다"
+          }
+        ],
+        "answer": "R2",
+        "wrongFeedback": {
+          "R1": "이미 지급된 거래를 다시 보내면 포인트가 두 번 지급될 수 있습니다.",
+          "R3": "지급 여부를 확인할 근거가 이미 있습니다. 보류하면 고객사가 스스로 재전송할 수도 있습니다."
+        }
+      },
+      "passFeedback": "지급은 14:02:11에 커밋됐고(E3, E4), 이후 알림 서비스의 동기 호출이 4.5초 걸리는 사이 제휴사 클라이언트가 3초 만에 연결을 끊었습니다(E2 499, E5). 재전송하면 중복 지급 위험이 있으므로 처리 완료를 회신합니다."
+    }
+  ],
+  "hints": [
+    {
+      "level": 1,
+      "kind": "방향",
+      "text": "한 요청은 여러 시스템을 지나며 각자 기록을 남깁니다. 고객사가 본 것과 우리 시스템이 한 일은 다를 수 있습니다."
+    },
+    {
+      "level": 2,
+      "kind": "위치",
+      "text": "거래번호가 직접 찍힌 곳은 포인트 서버 로그(E3)입니다. 업무 결과는 DB 조회 결과(E4)에서 확인할 수 있습니다."
+    },
+    {
+      "level": 3,
+      "kind": "해석",
+      "text": "E3의 'tx committed'는 지급이 확정됐다는 뜻이고, E2의 499는 응답이 오기 전에 고객사가 연결을 끊었다는 뜻입니다."
+    }
+  ],
+  "resolution": {
+    "modelRationale": "E3 로그에서 이 거래(req=gw-7f3a91)가 14:02:11.402에 커밋됐고, E4 DB에도 GRANTED 행이 있다. E2의 499와 E5의 3초 설정을 보면 고객사 클라이언트가 응답 전에 먼저 연결을 끊었다. 따라서 처리 완료이며, 재전송하면 중복 지급 위험이 있다.",
+    "selfCheck": [
+      {
+        "id": "sc-id",
+        "text": "거래번호나 요청 ID로 로그를 연결했다"
+      },
+      {
+        "id": "sc-commit",
+        "text": "커밋 또는 DB 반영을 근거로 들었다"
+      },
+      {
+        "id": "sc-retry",
+        "text": "재전송의 중복 처리 위험을 언급했다"
+      }
+    ],
+    "remedies": [
+      {
+        "action": "제휴사 타임아웃 연장",
+        "effect": "당장 실패 신고가 줄어든다",
+        "sideEffect": "근본 원인은 남고, 대기하는 연결과 스레드가 늘어난다"
+      },
+      {
+        "action": "알림 호출을 비동기로 분리",
+        "effect": "응답 지연의 근본 원인을 없앤다",
+        "sideEffect": "알림 누락이나 지연을 감지할 수단이 필요하다"
+      },
+      {
+        "action": "중복 요청 방지 (멱등 처리)",
+        "effect": "재전송해도 안전해진다",
+        "sideEffect": "다음 사건에서 다룬다"
+      }
+    ]
+  },
+  "next": {
+    "id": "inc-002",
+    "title": "두 번 지급된 포인트",
+    "teaser": "일주일 후. 제휴사 A가 '응답이 없으면 자동 재전송' 기능을 켰다. 회원 한 명이 포인트가 두 번 들어왔다고 문의한다.",
+    "available": false
+  },
+  "objective": "이 거래가 실제로 처리됐는지 판정하고, 제휴사에 재전송 여부를 회신하라.",
+  "criteria": [
+    "같은 요청을 우리 시스템 기록에서 찾아 연결한다 (체크포인트 1).",
+    "거래의 실제 상태, 결정적 근거 1~2줄, 제휴사 회신을 제출한다 (체크포인트 2).",
+    "근거는 흐름 뷰어나 원본 자료에서 직접 고른 기록 줄이어야 한다. 서술 근거는 자기 점검용이다."
+  ],
+  "board": {
+    "type": "request-flow",
+    "t0": "14:02:11.120",
+    "lanes": [
+      {
+        "id": "client",
+        "label": "제휴사 A 클라이언트",
+        "note": "read timeout 3초"
+      },
+      {
+        "id": "gw",
+        "label": "API 게이트웨이",
+        "note": "upstream timeout 30초"
+      },
+      {
+        "id": "app",
+        "label": "포인트 서버",
+        "note": "알림 호출 timeout 10초"
+      },
+      {
+        "id": "db",
+        "label": "DB",
+        "note": ""
+      },
+      {
+        "id": "notify",
+        "label": "알림 서비스",
+        "note": ""
+      }
+    ],
+    "traces": [
+      {
+        "id": "gw-7f3a91",
+        "label": "req=gw-7f3a91"
+      },
+      {
+        "id": "gw-7f3a9c",
+        "label": "req=gw-7f3a9c"
+      },
+      {
+        "id": "gw-7f3aa2",
+        "label": "req=gw-7f3aa2"
+      }
+    ],
+    "events": [
+      {
+        "id": "ev01",
+        "trace": "gw-7f3a91",
+        "t": 0,
+        "from": "client",
+        "to": "gw",
+        "kind": "request",
+        "label": "POST /v1/points/grant",
+        "details": [
+          [
+            "거래번호",
+            "PTX-20261118-0421"
+          ],
+          [
+            "금액",
+            "5000"
+          ]
+        ],
+        "lines": [
+          "E1-L2"
+        ],
+        "terms": []
+      },
+      {
+        "id": "ev02",
+        "trace": "gw-7f3a91",
+        "t": 25,
+        "from": "gw",
+        "to": "app",
+        "kind": "request",
+        "label": "전달 (req=gw-7f3a91 부여)",
+        "details": [
+          [
+            "헤더",
+            "X-Request-ID: gw-7f3a91"
+          ]
+        ],
+        "lines": [
+          "E3-L1"
+        ],
+        "terms": [
+          "request-id"
+        ]
+      },
+      {
+        "id": "ev03",
+        "trace": "gw-7f3a91",
+        "t": 278,
+        "from": "app",
+        "to": "db",
+        "kind": "request",
+        "label": "INSERT point_grant",
+        "details": [
+          [
+            "트랜잭션",
+            "시작 → INSERT"
+          ]
+        ],
+        "lines": [],
+        "terms": []
+      },
+      {
+        "id": "ev04",
+        "trace": "gw-7f3a91",
+        "t": 282,
+        "from": "db",
+        "to": "app",
+        "kind": "response",
+        "label": "COMMIT 완료",
+        "details": [
+          [
+            "grantId",
+            "G-88120"
+          ]
+        ],
+        "lines": [
+          "E3-L2",
+          "E4-L1"
+        ],
+        "terms": [
+          "commit"
+        ]
+      },
+      {
+        "id": "ev05",
+        "trace": "gw-7f3a91",
+        "t": 285,
+        "from": "app",
+        "to": "notify",
+        "kind": "request",
+        "label": "POST /notify (동기 호출)",
+        "details": [
+          [
+            "대기",
+            "응답이 올 때까지 포인트 서버 스레드가 기다림"
+          ]
+        ],
+        "lines": [
+          "E3-L3"
+        ],
+        "terms": [
+          "sync-call"
+        ]
+      },
+      {
+        "id": "ev06",
+        "trace": "gw-7f3a9c",
+        "t": 1180,
+        "from": "client",
+        "to": "gw",
+        "kind": "request",
+        "label": "POST /v1/points/grant",
+        "details": [
+          [
+            "거래번호",
+            "PTX-20261118-0422"
+          ]
+        ],
+        "lines": [],
+        "terms": []
+      },
+      {
+        "id": "ev07",
+        "trace": "gw-7f3a9c",
+        "t": 1190,
+        "from": "gw",
+        "to": "app",
+        "kind": "request",
+        "label": "전달 (req=gw-7f3a9c 부여)",
+        "details": [
+          [
+            "헤더",
+            "X-Request-ID: gw-7f3a9c"
+          ]
+        ],
+        "lines": [
+          "E3-L4"
+        ],
+        "terms": [
+          "request-id"
+        ]
+      },
+      {
+        "id": "ev08",
+        "trace": "gw-7f3a9c",
+        "t": 1215,
+        "from": "app",
+        "to": "gw",
+        "kind": "response",
+        "label": "400 INVALID_MEMBER",
+        "details": [
+          [
+            "상태",
+            "400"
+          ]
+        ],
+        "lines": [],
+        "terms": []
+      },
+      {
+        "id": "ev09",
+        "trace": "gw-7f3a9c",
+        "t": 1221,
+        "from": "gw",
+        "to": "client",
+        "kind": "response",
+        "label": "400 응답",
+        "details": [
+          [
+            "request_time",
+            "0.041"
+          ]
+        ],
+        "lines": [
+          "E2-L2"
+        ],
+        "terms": []
+      },
+      {
+        "id": "ev10",
+        "trace": "gw-7f3aa2",
+        "t": 2750,
+        "from": "client",
+        "to": "gw",
+        "kind": "request",
+        "label": "GET /v1/points/balance (제휴사 B)",
+        "details": [
+          [
+            "클라이언트",
+            "partner-B"
+          ]
+        ],
+        "lines": [],
+        "terms": []
+      },
+      {
+        "id": "ev11",
+        "trace": "gw-7f3aa2",
+        "t": 2772,
+        "from": "gw",
+        "to": "client",
+        "kind": "response",
+        "label": "200 응답",
+        "details": [
+          [
+            "request_time",
+            "0.022"
+          ]
+        ],
+        "lines": [
+          "E2-L3"
+        ],
+        "terms": []
+      },
+      {
+        "id": "ev12",
+        "trace": "gw-7f3a91",
+        "t": 3000,
+        "from": "client",
+        "to": "gw",
+        "kind": "close",
+        "label": "Read timed out → 연결 종료 (FIN)",
+        "details": [
+          [
+            "클라이언트 설정",
+            "read timeout 3초"
+          ]
+        ],
+        "lines": [
+          "E1-L3"
+        ],
+        "terms": [
+          "timeout"
+        ]
+      },
+      {
+        "id": "ev13",
+        "trace": "gw-7f3a91",
+        "t": 3008,
+        "from": "gw",
+        "to": "app",
+        "kind": "close",
+        "label": "상류 연결 종료, 접근 로그 499 기록",
+        "details": [
+          [
+            "status",
+            "499"
+          ],
+          [
+            "request_time",
+            "3.008"
+          ]
+        ],
+        "lines": [
+          "E2-L1"
+        ],
+        "terms": [
+          "client-closed"
+        ]
+      },
+      {
+        "id": "ev14",
+        "trace": "gw-7f3a91",
+        "t": 4770,
+        "from": "notify",
+        "to": "app",
+        "kind": "response",
+        "label": "200 OK (4485ms)",
+        "details": [
+          [
+            "소요",
+            "4485ms"
+          ]
+        ],
+        "lines": [
+          "E3-L5"
+        ],
+        "terms": [
+          "sync-call"
+        ]
+      },
+      {
+        "id": "ev15",
+        "trace": "gw-7f3a91",
+        "t": 4783,
+        "from": "app",
+        "to": "gw",
+        "kind": "error",
+        "label": "HTTP 200 쓰기 시도 → Broken pipe",
+        "details": [
+          [
+            "결과",
+            "받을 상대 없음"
+          ]
+        ],
+        "lines": [
+          "E3-L6"
+        ],
+        "terms": [
+          "broken-pipe"
+        ]
+      }
+    ]
+  },
+  "references": [],
+  "referenceNote": "공개 사례가 아닌 자체 설계 사건입니다 (로컬 재현 실험으로 검증)."
+}
